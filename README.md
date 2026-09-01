@@ -33,6 +33,9 @@ spelling:
 announcer.send(**{"from": "billing@acme.com", "to": "customer@example.com", "text": "Hi"})
 ```
 
+`to`, `cc` and `bcc` each take one address or a list, and `reply_to` sets the
+reply address — see [Several recipients](#several-recipients).
+
 ### Async
 
 Same surface, awaited:
@@ -127,9 +130,33 @@ pass through untouched — those keys are your data.
 
 ## Several recipients
 
-Announcer sends to one recipient per call — no CC, no BCC. `send_many` fans out
-and hands back a result per recipient, so one suppressed address does not sink
-the batch:
+`to`, `cc` and `bcc` each take one address or a list. Everything in `to` and
+`cc` is **one email** whose recipients see each other; `bcc` recipients see
+nobody, not even each other:
+
+```python
+announcer.send(
+    from_="billing@acme.com",
+    to=["customer@example.com", "partner@example.com"],
+    cc="accounting@acme.com",
+    bcc="archive@acme.com",
+    reply_to="support@acme.com",
+    subject="Your receipt",
+    text="Thanks!",
+)
+```
+
+At most 50 addresses across the three. `reply_to` is a header only — it costs
+nothing and cannot bounce.
+
+**Recipients are the billable unit.** That call counts four against your quota,
+not one. It is also what keeps `monthly_hard_cap` meaningful: otherwise a leaked
+key could send fifty times your ceiling by padding the list.
+
+### One email, or many?
+
+For anything list-shaped — a newsletter, a digest, a fan-out — you want
+`send_many`, not a list:
 
 ```python
 results = announcer.emails.send_many(
@@ -144,8 +171,33 @@ for r in results:
         print(f"{r.to} failed: {r.error}")
 ```
 
-Each recipient gets its own derived idempotency key, and no recipient can see
-the others.
+|  | `send(to=[a, b])` | `send_many([a, b], …)` |
+|---|---|---|
+| Emails sent | one | two |
+| Do they see each other? | yes, in `To:` | no |
+| API requests | one | two |
+| Idempotency key | one | one each, derived |
+| One address fails | the send reports it | the others are unaffected |
+
+### Suppressed recipients
+
+A recipient on your suppression list is dropped and the rest still goes out:
+
+```python
+result = announcer.send(
+    from_="billing@acme.com",
+    to=["good@example.com", "bounced-before@example.com"],
+    subject="Your receipt",
+    text="Thanks!",
+)
+
+result.recipients  # 1 — what actually went out and what you were billed
+result.suppressed  # ['bounced-before@example.com']
+```
+
+`SuppressedRecipientError` is raised only when *every* recipient is suppressed
+(or every `to` recipient — a message with no visible primary recipient is
+refused rather than sent). Its `.suppressed` list names them all.
 
 ## Webhooks
 
@@ -218,8 +270,8 @@ AsyncAnnouncer(...)  # same arguments
 |------|------|
 | `announcer.send(**msg)` | Shorthand for `emails.send`. |
 | `announcer.usage()` | Quota consumption plus a 14-day sending series. |
-| `emails.send(**msg)` | Sends one email. |
-| `emails.send_many(recipients, **msg)` | One call per recipient, result per recipient. |
+| `emails.send(**msg)` | Sends one email. `to`/`cc`/`bcc` take one address or many. |
+| `emails.send_many(recipients, **msg)` | Separate emails, one per recipient. |
 | `emails.list(limit=, status=, search=)` | Send history. |
 | `emails.events(message_id)` | A message's audit trail. |
 | `domains.create(domain)` | Registers a domain, returns the DNS record. |

@@ -70,13 +70,92 @@ def test_send_reports_an_idempotent_replay():
     assert result.idempotent_replay is True
 
 
-def test_send_refuses_a_list_of_recipients():
+def test_send_accepts_a_list_of_recipients(sent_ok):
+    client, rec = make_client([sent_ok])
+
+    client.send(from_="a@acme.test", to=["b@example.com", "c@example.com"], text="hi")
+
+    assert rec.body()["to"] == ["b@example.com", "c@example.com"]
+
+
+def test_send_refuses_an_empty_recipient_list():
     client, rec = make_client([])
 
-    with pytest.raises(TypeError, match="send_many"):
-        client.send(from_="a@acme.test", to=["b@example.com", "c@example.com"], text="hi")
+    with pytest.raises(TypeError, match="at least one"):
+        client.send(from_="a@acme.test", to=[], text="hi")
 
     assert rec.calls == []
+
+
+def test_send_carries_cc_bcc_and_reply_to(sent_ok):
+    client, rec = make_client([sent_ok])
+
+    client.send(
+        from_="billing@acme.test",
+        to="customer@example.com",
+        cc="accounting@acme.test",
+        bcc=["archive@acme.test", "audit@acme.test"],
+        reply_to="support@acme.test",
+        subject="Your receipt",
+        text="Thanks!",
+    )
+
+    assert rec.body() == {
+        "from": "billing@acme.test",
+        "to": "customer@example.com",
+        "cc": "accounting@acme.test",
+        "bcc": ["archive@acme.test", "audit@acme.test"],
+        # The API accepts replyTo too, but snake_case is its documented shape.
+        "reply_to": "support@acme.test",
+        "subject": "Your receipt",
+        "text": "Thanks!",
+    }
+
+
+def test_send_accepts_the_camel_case_reply_to_for_splatted_dicts(sent_ok):
+    client, rec = make_client([sent_ok])
+
+    client.send(**{"from": "a@acme.test", "to": "b@example.com", "text": "hi",
+                   "replyTo": "support@acme.test"})
+
+    assert rec.body()["reply_to"] == "support@acme.test"
+
+
+def test_send_omits_headers_left_unset(sent_ok):
+    client, rec = make_client([sent_ok])
+
+    client.send(from_="a@acme.test", to="b@example.com", text="hi")
+
+    assert "cc" not in rec.body()
+    assert "bcc" not in rec.body()
+    assert "reply_to" not in rec.body()
+
+
+def test_send_reports_partially_suppressed_recipients():
+    client, _ = make_client(
+        [
+            {
+                "json": {
+                    "id": "m",
+                    "messageId": "<x@a.test>",
+                    "status": "sent",
+                    "recipients": 2,
+                    "suppressed": ["dead@example.com"],
+                }
+            }
+        ]
+    )
+
+    result = client.send(
+        from_="a@acme.test",
+        to=["good@example.com", "dead@example.com"],
+        cc="copied@example.com",
+        text="hi",
+    )
+
+    # The message still went out; only the bad address was dropped.
+    assert result.recipients == 2
+    assert result.suppressed == ["dead@example.com"]
 
 
 def test_send_refuses_a_message_with_no_body():
@@ -91,8 +170,10 @@ def test_send_refuses_a_message_with_no_body():
 def test_send_rejects_unknown_arguments():
     client, _ = make_client([])
 
-    with pytest.raises(TypeError, match="cc"):
-        client.send(from_="a@acme.test", to="b@example.com", text="hi", cc="d@example.com")
+    # Announcer has no attachments, and a silently ignored kwarg is how a
+    # caller ends up believing it sent one.
+    with pytest.raises(TypeError, match="attachments"):
+        client.send(from_="a@acme.test", to="b@example.com", text="hi", attachments=[])
 
 
 def test_send_raises_suppressed_recipient_with_the_address():
@@ -115,6 +196,30 @@ def test_send_raises_suppressed_recipient_with_the_address():
     assert excinfo.value.recipient == "bounced@example.com"
     assert excinfo.value.status == 422
     assert "suppression list" in str(excinfo.value)
+
+
+def test_a_fully_suppressed_send_lists_every_refused_address():
+    client, _ = make_client(
+        [
+            {
+                "status": 422,
+                "json": {
+                    "status": 422,
+                    "detail": "All 2 recipients are on your suppression list.",
+                    "suppressed": ["one@example.com", "two@example.com"],
+                },
+            }
+        ]
+    )
+
+    with pytest.raises(SuppressedRecipientError) as excinfo:
+        client.send(
+            from_="a@acme.test", to=["one@example.com", "two@example.com"], text="hi"
+        )
+
+    # Read from the API's extension member, not parsed out of the prose.
+    assert excinfo.value.suppressed == ["one@example.com", "two@example.com"]
+    assert excinfo.value.recipient == "one@example.com"
 
 
 def test_send_many_reports_each_outcome():
@@ -196,6 +301,8 @@ def test_list_maps_the_snake_case_row_onto_from_and_to():
                         "subject": "Receipt",
                         "status": "delivered",
                         "created_at": "2026-09-01T10:00:00Z",
+                        "recipient_count": 3,
+                        "reply_to": "support@acme.test",
                     }
                 ]
             }
@@ -213,6 +320,9 @@ def test_list_maps_the_snake_case_row_onto_from_and_to():
     # Timestamps arrive as real datetimes, not strings.
     assert message.created_at.year == 2026
     assert message.created_at.tzinfo is not None
+    # `to` is the primary; the total lives alongside it.
+    assert message.recipient_count == 3
+    assert message.reply_to == "support@acme.test"
 
 
 def test_list_omits_unset_filters():

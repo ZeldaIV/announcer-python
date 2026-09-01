@@ -115,17 +115,32 @@ class UnprocessableEntityError(AnnouncerError):
 
 
 class SuppressedRecipientError(UnprocessableEntityError):
-    """422 from a send -- the recipient is on this account's suppression list.
+    """422 from a send -- every recipient is on this account's suppression list.
 
     They hard-bounced or complained previously. The attempt is still recorded
     and still counts against quota. Do not retry: remove them from the
     suppression list first, or stop mailing them.
+
+    A send where only *some* recipients are suppressed does not raise: the rest
+    goes out and the dropped addresses come back in ``SentEmail.suppressed``.
     """
 
-    def __init__(self, message: str, *, recipient: Optional[str] = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        recipient: Optional[str] = None,
+        suppressed: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(message, **kwargs)
-        #: The address that was refused.
-        self.recipient = recipient
+        #: Every address that was refused, as reported by the API. Prefer this
+        #: over parsing :attr:`AnnouncerError.detail`: the API sends it as an
+        #: RFC 9457 extension member so clients need not read the prose.
+        self.suppressed: List[str] = list(suppressed or [])
+        #: The first refused address. Convenience for the single-recipient case;
+        #: falls back to the address the SDK sent when the API named none.
+        self.recipient = self.suppressed[0] if self.suppressed else recipient
 
 
 class RateLimitError(AnnouncerError):
@@ -228,7 +243,12 @@ def error_from_response(
         # Only the send path can produce a suppression refusal; anything else
         # 422 is a plain unprocessable (domain limit, failed DKIM verification).
         if path == "/v1/emails":
-            return SuppressedRecipientError(message, recipient=recipient, **common)
+            return SuppressedRecipientError(
+                message,
+                recipient=recipient,
+                suppressed=(body or {}).get("suppressed"),
+                **common,
+            )
         return UnprocessableEntityError(message, **common)
     if status == 429:
         return RateLimitError(message, retry_after=_parse_retry_after(headers), **common)

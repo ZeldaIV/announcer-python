@@ -47,6 +47,7 @@ from .types import (
     EVENT_TYPES,
     KEY_SCOPES,
     MESSAGE_STATUSES,
+    Addresses,
     ApiKey,
     BatchSendResult,
     CreatedApiKey,
@@ -103,6 +104,7 @@ __all__ = [
     "InternalServerError",
     "SignatureVerificationError",
     # Types
+    "Addresses",
     "MESSAGE_STATUSES",
     "EVENT_TYPES",
     "KEY_SCOPES",

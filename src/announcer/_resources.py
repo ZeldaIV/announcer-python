@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from ._http import AsyncTransport, SyncTransport
 from .errors import AnnouncerError
 from .types import (
+    Addresses,
     ApiKey,
     BatchSendResult,
     CreatedApiKey,
@@ -28,16 +29,33 @@ from .types import (
 from .webhooks import DEFAULT_TOLERANCE_SECONDS, verify_webhook
 
 
+def _normalise(value: Addresses) -> Any:
+    """A single address or a list of them, as the API wants it."""
+    if isinstance(value, (list, tuple, set)):
+        return [str(address) for address in value]
+    return str(value)
+
+
+def _first(value: Addresses) -> str:
+    """The first address of a list, for error reporting."""
+    if isinstance(value, (list, tuple, set)):
+        return next((str(a) for a in value), "")
+    return str(value)
+
+
 def _build_send(
     from_: Optional[str],
-    to: Optional[str],
+    to: Optional[Addresses],
+    cc: Optional[Addresses],
+    bcc: Optional[Addresses],
+    reply_to: Optional[Addresses],
     subject: Optional[str],
     text: Optional[str],
     html: Optional[str],
     idempotency_key: Optional[str],
     extra: Mapping[str, Any],
 ) -> Tuple[Dict[str, Any], str, str]:
-    """Validate a send and return ``(body, idempotency_key, recipient)``.
+    """Validate a send and return ``(body, idempotency_key, first_recipient)``.
 
     Shared by the sync and async paths so the two can never drift on what
     counts as a valid message.
@@ -46,25 +64,32 @@ def _build_send(
     # `from` is a Python keyword, so the kwarg is `from_`. Accept the raw
     # spelling too, for callers who splat a dict they got from elsewhere.
     sender = from_ if from_ is not None else unknown.pop("from", None)
+    if reply_to is None:
+        reply_to = unknown.pop("replyTo", None)
     if unknown:
         raise TypeError(
             f"Unexpected argument(s) to send(): {', '.join(sorted(unknown))}. "
-            "Announcer accepts from_, to, subject, text, html, idempotency_key."
+            "Announcer accepts from_, to, cc, bcc, reply_to, subject, text, html, "
+            "idempotency_key."
         )
 
     if not sender:
         raise TypeError("send() needs a `from_` address (or 'from' if you are splatting a dict).")
     if to is None:
         raise TypeError("send() needs a `to` address.")
-    if isinstance(to, (list, tuple, set)):
-        raise TypeError(
-            "Announcer sends to one recipient per call. Use emails.send_many(recipients, ...) "
-            "to fan out, which gives you a per-recipient result and its own idempotency key."
-        )
+    if isinstance(to, (list, tuple, set)) and not to:
+        raise TypeError("send() needs at least one `to` recipient.")
     if not text and not html:
         raise TypeError("Provide `text`, `html`, or both -- an email needs a body.")
 
-    body = {"from": sender, "to": to}
+    body: Dict[str, Any] = {"from": sender, "to": _normalise(to)}
+    if cc is not None:
+        body["cc"] = _normalise(cc)
+    if bcc is not None:
+        body["bcc"] = _normalise(bcc)
+    if reply_to is not None:
+        # The API accepts `replyTo` too, but snake_case is its documented shape.
+        body["reply_to"] = _normalise(reply_to)
     if subject is not None:
         body["subject"] = subject
     if text is not None:
@@ -73,7 +98,7 @@ def _build_send(
         body["html"] = html
 
     # Generated when absent so the SDK's own retries can never double-send.
-    return body, idempotency_key or str(uuid.uuid4()), to
+    return body, idempotency_key or str(uuid.uuid4()), _first(to)
 
 
 class Emails:
@@ -86,7 +111,10 @@ class Emails:
         self,
         *,
         from_: Optional[str] = None,
-        to: Optional[str] = None,
+        to: Optional[Addresses] = None,
+        cc: Optional[Addresses] = None,
+        bcc: Optional[Addresses] = None,
+        reply_to: Optional[Addresses] = None,
         subject: Optional[str] = None,
         text: Optional[str] = None,
         html: Optional[str] = None,
@@ -95,11 +123,17 @@ class Emails:
     ) -> SentEmail:
         """Send one email.
 
+        ``to``, ``cc`` and ``bcc`` each take one address or a list. Everything
+        in ``to`` and ``cc`` is one email whose recipients see each other;
+        ``bcc`` recipients see nobody. At most 50 addresses across the three.
+
         ::
 
             announcer.send(
                 from_="Acme <billing@acme.com>",
-                to="customer@example.com",
+                to=["customer@example.com", "partner@example.com"],
+                cc="accounting@acme.com",
+                reply_to="support@acme.com",
                 subject="Your receipt",
                 text="Thanks!",
             )
@@ -108,12 +142,20 @@ class Emails:
         SDK's automatic retries can never send twice. Supply your own -- an
         order id, a job id -- to extend that guarantee across process restarts.
 
+        A recipient on your suppression list is dropped and reported in
+        :attr:`SentEmail.suppressed`; the rest of the message still goes out.
+        Only when every recipient is suppressed does this raise.
+
         :raises PermissionDeniedError: the ``from_`` domain is not registered, or
             not verified.
-        :raises SuppressedRecipientError: the recipient bounced or complained before.
+        :raises SuppressedRecipientError: every recipient bounced or complained
+            before.
         :raises RateLimitError: a per-second limit or a daily/monthly quota.
+            Quota counts recipients, so one call can consume several.
         """
-        body, key, recipient = _build_send(from_, to, subject, text, html, idempotency_key, extra)
+        body, key, recipient = _build_send(
+            from_, to, cc, bcc, reply_to, subject, text, html, idempotency_key, extra
+        )
         data = self._t.request(
             "POST",
             "/v1/emails",
@@ -131,6 +173,9 @@ class Emails:
         recipients: Sequence[str],
         *,
         from_: Optional[str] = None,
+        cc: Optional[Addresses] = None,
+        bcc: Optional[Addresses] = None,
+        reply_to: Optional[Addresses] = None,
         subject: Optional[str] = None,
         text: Optional[str] = None,
         html: Optional[str] = None,
@@ -138,11 +183,22 @@ class Emails:
         stop_on_error: bool = False,
         **extra: Any,
     ) -> List[BatchSendResult]:
-        """Send the same message to several recipients, one API call each.
+        """Send the same message to several recipients as **separate emails**.
 
-        Returns a result per recipient; one failure does not stop the rest
-        unless ``stop_on_error`` is set. These are separate emails -- no
-        recipient can see the others.
+        One API call each, a result per recipient, and one failure does not stop
+        the rest unless ``stop_on_error`` is set.
+
+        Not the same as passing a list to :meth:`send`:
+
+        * ``send(to=[a, b])`` is one email. A and B see each other in the
+          ``To:`` header and it costs one request.
+        * ``send_many([a, b], ...)`` is two emails. Neither knows the other
+          exists, and each gets its own idempotency key and its own bounce.
+
+        Use this for anything list-shaped -- a newsletter, a digest, a fan-out.
+
+        A ``cc`` here is copied on *every* message, so a three-recipient batch
+        sends the cc three copies. That is usually not what you want.
         """
         results: List[BatchSendResult] = []
         for index, recipient in enumerate(recipients):
@@ -154,6 +210,9 @@ class Emails:
                 sent = self.send(
                     from_=from_,
                     to=recipient,
+                    cc=cc,
+                    bcc=bcc,
+                    reply_to=reply_to,
                     subject=subject,
                     text=text,
                     html=html,
@@ -198,7 +257,10 @@ class AsyncEmails:
         self,
         *,
         from_: Optional[str] = None,
-        to: Optional[str] = None,
+        to: Optional[Addresses] = None,
+        cc: Optional[Addresses] = None,
+        bcc: Optional[Addresses] = None,
+        reply_to: Optional[Addresses] = None,
         subject: Optional[str] = None,
         text: Optional[str] = None,
         html: Optional[str] = None,
@@ -206,7 +268,9 @@ class AsyncEmails:
         **extra: Any,
     ) -> SentEmail:
         """Send one email. See :meth:`Emails.send`."""
-        body, key, recipient = _build_send(from_, to, subject, text, html, idempotency_key, extra)
+        body, key, recipient = _build_send(
+            from_, to, cc, bcc, reply_to, subject, text, html, idempotency_key, extra
+        )
         data = await self._t.request(
             "POST",
             "/v1/emails",
@@ -222,6 +286,9 @@ class AsyncEmails:
         recipients: Sequence[str],
         *,
         from_: Optional[str] = None,
+        cc: Optional[Addresses] = None,
+        bcc: Optional[Addresses] = None,
+        reply_to: Optional[Addresses] = None,
         subject: Optional[str] = None,
         text: Optional[str] = None,
         html: Optional[str] = None,
@@ -237,6 +304,9 @@ class AsyncEmails:
                 sent = await self.send(
                     from_=from_,
                     to=recipient,
+                    cc=cc,
+                    bcc=bcc,
+                    reply_to=reply_to,
                     subject=subject,
                     text=text,
                     html=html,

@@ -13,9 +13,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date as _date
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+
+#: One address or several. Every address may carry a display name:
+#: ``"Acme Billing <billing@acme.com>"``.
+Addresses = Union[str, Sequence[str]]
 
 __all__ = [
+    "Addresses",
     "MESSAGE_STATUSES",
     "EVENT_TYPES",
     "KEY_SCOPES",
@@ -105,6 +110,12 @@ class SentEmail:
     #: True when this idempotency key had already been used. Nothing was sent
     #: a second time; these are the original send's details.
     idempotent_replay: bool = False
+    #: How many addresses the message went to, across to, cc and bcc. This is
+    #: the number billed and counted against quota.
+    recipients: int = 1
+    #: Addresses dropped because they are on your suppression list. Empty on a
+    #: clean send -- the rest of the message still went out.
+    suppressed: List[str] = field(default_factory=list)
 
     @classmethod
     def from_api(cls, data: Mapping[str, Any]) -> "SentEmail":
@@ -113,6 +124,10 @@ class SentEmail:
             message_id=_first(data, "messageId", "message_id"),
             status=data.get("status", "sent"),
             idempotent_replay=bool(_first(data, "idempotentReplay", "idempotent_replay", default=False)),
+            # Older deployments predate both fields; a successful send is at
+            # least one recipient and dropped nobody.
+            recipients=int(data.get("recipients", 1)),
+            suppressed=list(data.get("suppressed") or []),
         )
 
 
@@ -126,11 +141,19 @@ class Message:
     #: The ``From:`` header that went out. Trailing underscore because ``from``
     #: is a Python keyword.
     from_: str
-    #: The recipient.
+    #: The primary recipient -- the first ``to`` address. A message with cc,
+    #: bcc or several ``to`` addresses reports its first here and the total in
+    #: :attr:`recipient_count`.
     to: str
     subject: Optional[str]
+    #: The rolled-up status. One bounced recipient makes the whole message
+    #: ``bounced`` -- it is the thing you have to act on.
     status: str
     created_at: Optional[datetime]
+    #: How many addresses the message went to, across to, cc and bcc.
+    recipient_count: int = 1
+    #: The ``Reply-To:`` header that went out, if any.
+    reply_to: Optional[str] = None
 
     @classmethod
     def from_api(cls, data: Mapping[str, Any]) -> "Message":
@@ -144,6 +167,8 @@ class Message:
             subject=data.get("subject"),
             status=data.get("status", ""),
             created_at=_dt(_first(data, "created_at", "createdAt")),
+            recipient_count=int(_first(data, "recipient_count", "recipientCount", default=1)),
+            reply_to=_first(data, "reply_to", "replyTo"),
         )
 
 
