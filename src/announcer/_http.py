@@ -27,7 +27,7 @@ from .errors import (
 #: Where the hosted API lives.
 DEFAULT_BASE_URL = "https://mail.misralo.com"
 
-SDK_VERSION = "0.1.0"
+SDK_VERSION = "0.1.1"
 
 #: Never wait longer than this between attempts, whatever the server suggests.
 _MAX_BACKOFF = 8.0
