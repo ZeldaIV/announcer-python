@@ -302,17 +302,6 @@ key = announcer.api_keys.create("production-worker", "send")
 A leaked send key cannot register domains, mint successor keys, or touch
 billing. It is the difference between an incident and a catastrophe.
 
-## Local development
-
-Point the SDK at a local Announcer stack:
-
-```python
-announcer = Announcer(
-    "ann_dev_0000000000000000000000000000",
-    base_url="http://localhost:8080",
-)
-```
-
 ## Contributing
 
 ```bash

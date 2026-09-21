@@ -24,7 +24,7 @@ from .errors import (
     error_from_response,
 )
 
-#: Where the hosted API lives. Override for self-hosted or local stacks.
+#: Where the hosted API lives.
 DEFAULT_BASE_URL = "https://mail.misralo.com"
 
 SDK_VERSION = "0.1.0"

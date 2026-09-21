@@ -47,7 +47,7 @@ class Announcer:
 
     :param api_key: Your ``ann_...`` key. Falls back to ``ANNOUNCER_API_KEY``.
     :param base_url: API root. Falls back to ``ANNOUNCER_BASE_URL``, then the
-        hosted API. Point at ``http://localhost:8080`` for a local stack.
+        hosted API.
     :param timeout: Per-attempt timeout in seconds.
     :param max_retries: Extra attempts after a failure.
     :param user_agent: Appended to the SDK's own. Name your app here.
